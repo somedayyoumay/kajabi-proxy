@@ -1,23 +1,34 @@
-// This is the full and correct code for: /netlify/functions/getPtoBalance.js
+// ... (inside the handler function)
+} catch (error) {
+    console.error("Error looking up user name in Kajabi:", error); // This is line 58
+    return { statusCode: 500, headers, body: JSON.stringify({ error: 'Failed to look up user name.' }) };
+}
+```Wait, that's the error *handler*. Let's look at the `try` block just before it. The `SyntaxError` is coming from trying to parse a response from the Kajabi API.
+
+Specifically, this line is the culprit:
+`const userData = await kajabiResponse.json();`
+
+The error "Unexpected end of JSON input" means that the `fetch` call to the Kajabi GraphQL API succeeded, but the **response body was empty or not valid JSON**, so `JSON.parse()` failed.
+
+**Why would the response be empty?**
+
+This almost always happens when an API call fails authentication. The server sends back an error page (which is often HTML or plain text, not JSON) or an empty body with a `401 Unauthorized` or `403 Forbidden` status. Our code, however, has a check for this: `if (!kajabiResponse.ok)`. It seems that even if the authentication fails, Kajabi might be sending back a `200 OK` status with a non-JSON body, which is unusual API behavior but possible.
+
+**Let's make our function more robust to handle this possibility.**
+
+We will add a `try...catch` block specifically around the `kajabiResponse.json()` part to see what the raw text of the response is.
+
+---
+
+### Final Netlify Function Code (`getPtoBalance.js`)
+
+Please update your `getPtoBalance.js` file in GitHub one last time with this version. It adds better error handling to show us exactly what Kajabi is sending back.
+
+```javascript
+// /netlify/functions/getPtoBalance.js - FINAL VERSION with Robust Error Logging
 
 const pollForResult = async (taskId, automationApiKey) => {
-    let attempts = 0;
-    const maxAttempts = 30;
-    const pollInterval = 1500;
-    while (attempts < maxAttempts) {
-        attempts++;
-        const statusUrl = `https://api.browser-use.com/api/v1/task/${taskId}/status`;
-        try {
-            const response = await fetch(statusUrl, { headers: { 'Authorization': `Bearer ${automationApiKey}` } });
-            if (response.ok) {
-                const data = await response.json();
-                if (data.status === 'completed') return data.result;
-                if (data.status === 'failed' || data.error) throw new Error("Automation task failed.");
-            }
-        } catch (e) { console.error(`Polling attempt ${attempts} failed:`, e); }
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-    }
-    throw new Error("Automation task timed out.");
+    // ... (polling logic is unchanged) ...
 };
 
 exports.handler = async (event, context) => {
@@ -41,7 +52,9 @@ exports.handler = async (event, context) => {
         return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid request body or missing userId." }) };
     }
 
+    // STEP 2: Use Kajabi GraphQL API to get the name for this ID
     try {
+        console.log(`Looking up Kajabi name for userId: ${userId}`);
         const kajabiApiUrl = 'https://api.kajabi.com/v2/graphql';
         const graphqlQuery = { query: `query($id: ID!) { user(id: $id) { name } }`, variables: { id: userId } };
         
@@ -55,28 +68,32 @@ exports.handler = async (event, context) => {
         });
 
         if (!kajabiResponse.ok) {
-             const errorBody = await kajabiResponse.json();
-             throw new Error(`Kajabi API responded with status: ${kajabiResponse.status}. Details: ${JSON.stringify(errorBody)}`);
+             const errorText = await kajabiResponse.text();
+             console.error("Kajabi API Error Response (Text):", errorText);
+             throw new Error(`Kajabi API responded with non-OK status: ${kajabiResponse.status}`);
         }
         
-        const userData = await kajabiResponse.json();
+        // ---- NEW Robust JSON Parsing ----
+        const responseText = await kajabiResponse.text();
+        let userData;
+        try {
+            userData = JSON.parse(responseText);
+        } catch (jsonError) {
+            console.error("Failed to parse Kajabi API response as JSON.", jsonError);
+            console.error("Raw response text from Kajabi:", responseText);
+            throw new Error("Kajabi API returned non-JSON response.");
+        }
+        // ---- End of New Parsing ----
+
         userName = userData.data.user.name;
-        if (!userName) throw new Error("Could not find user name for the provided ID in GraphQL response.");
+        if (!userName) throw new Error("Could not find user name in GraphQL response.");
+        console.log(`Successfully found name: ${userName}`);
+
     } catch (error) {
         console.error("Error looking up user name in Kajabi:", error);
         return { statusCode: 500, headers, body: JSON.stringify({ error: 'Failed to look up user name.' }) };
     }
 
-    try {
-        const instructionTask = `1. Go to the URL: https://netorg3945244-my.sharepoint.com/:x:/g/personal/serhat_bezla_com/EaPKaJZNrklKtHFOcFLzy_sBGWEM77NUxZtaAOx7fvGMrw?e=1mohil&nav=MTVfezAwMDAwMDAwLTAwMDEtMDAwMC0wNDAwLTAwMDAwMDAwMDAwMH0\n2. Wait: Wait until the spreadsheet is fully interactive and the main title "EMPLOYEE PAID-TIME-OFF REPORT" is visible.\n3. Locate and Select Employee: Find the dropdown menu visually labeled "CHOOSE EMPLOYEE". Click on this dropdown.\n4. Type to Select: In the dropdown or search field that appears, type the name "${userName}" to find and select that specific employee.\n5. Confirm Selection: Press the Enter key to confirm the selection and close the dropdown.\n6. Wait for Update: Wait for 3 seconds to ensure all data on the page, especially the "Current Balance" field, has fully updated based on the new employee selection.\n7. Read Balance: Locate the field visually labeled "Current Balance". Within that area, find the numerical value for "Vacation".\n8. Return Value: Return only the final numerical value that you read from the "Current Balance" field.`;
-        const dataToSend = { task: instructionTask, llm_model: "gemini-2.5-flash" };
-        const runTaskResponse = await fetch('https://api.browser-use.com/api/v1/run-task', { method: 'POST', headers: { 'Authorization': `Bearer ${AUTOMATION_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(dataToSend) });
-        const runTaskData = await runTaskResponse.json();
-        if (!runTaskData.id) throw new Error("Failed to start automation task.");
-        const ptoBalance = await pollForResult(runTaskData.id, AUTOMATION_API_KEY);
-        return { statusCode: 200, headers, body: JSON.stringify({ balance: ptoBalance }) };
-    } catch (error) {
-        console.error("Error during automation:", error);
-        return { statusCode: 500, headers, body: JSON.stringify({ error: 'Automation process failed.' }) };
-    }
+    // STEP 3 & 4: Trigger automation and poll for result (this part is unchanged)
+    // ...
 };
