@@ -1,4 +1,4 @@
-// /netlify/functions/getPtoBalance.js - NEW VERSION
+// /netlify/functions/getPtoBalance.js - FINAL VERSION
 
 const pollForResult = async (taskId, automationApiKey) => {
     // (Polling logic remains the same as before...)
@@ -29,10 +29,8 @@ exports.handler = async (event, context) => {
 
     if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers };
 
-    // Get secrets from Netlify Environment Variables
     const { KAJABI_API_KEY, KAJABI_API_SECRET, AUTOMATION_API_KEY } = process.env;
 
-    // STEP 1: Get userId from the incoming request body
     if (!event.body) return { statusCode: 400, headers, body: JSON.stringify({ error: "Request body missing." }) };
     
     let userId, userName;
@@ -44,24 +42,42 @@ exports.handler = async (event, context) => {
         return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid request body or missing userId." }) };
     }
 
-    // STEP 2: Use Kajabi API securely to get the name for this ID
+    // STEP 2 (Corrected): Use Kajabi GraphQL API to get the name for this ID
     try {
         console.log(`Looking up Kajabi name for userId: ${userId}`);
-        const kajabiUserUrl = `https://api.kajabi.com/v1/users/${userId}`;
+        const kajabiApiUrl = 'https://api.kajabi.com/v2/graphql';
         
-        const kajabiResponse = await fetch(kajabiUserUrl, {
-            headers: {
-                // Using Basic Auth with Key and Secret for server-to-server call
-                'Authorization': 'Basic ' + Buffer.from(KAJABI_API_KEY + ':' + KAJABI_API_SECRET).toString('base64')
+        // GraphQL query to find a user by their ID
+        const graphqlQuery = {
+            query: `query($id: ID!) {
+                user(id: $id) {
+                    name
+                }
+            }`,
+            variables: {
+                id: userId
             }
+        };
+        
+        const kajabiResponse = await fetch(kajabiApiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Basic ' + Buffer.from(KAJABI_API_KEY + ':' + KAJABI_API_SECRET).toString('base64')
+            },
+            body: JSON.stringify(graphqlQuery)
         });
 
-        if (!kajabiResponse.ok) throw new Error(`Kajabi API responded with status: ${kajabiResponse.status}`);
+        if (!kajabiResponse.ok) {
+             const errorBody = await kajabiResponse.json();
+             console.error("Kajabi API Error Response:", errorBody);
+             throw new Error(`Kajabi API responded with status: ${kajabiResponse.status}`);
+        }
         
         const userData = await kajabiResponse.json();
-        userName = userData.data.attributes.name;
+        userName = userData.data.user.name;
 
-        if (!userName) throw new Error("Could not find user name for the provided ID.");
+        if (!userName) throw new Error("Could not find user name for the provided ID in GraphQL response.");
         console.log(`Successfully found name: ${userName}`);
 
     } catch (error) {
@@ -69,7 +85,7 @@ exports.handler = async (event, context) => {
         return { statusCode: 500, headers, body: JSON.stringify({ error: 'Failed to look up user name.' }) };
     }
 
-    // STEP 3 & 4: Trigger the automation and poll for the result
+    // STEP 3 & 4: Trigger automation and poll for result (this part is unchanged)
     try {
         console.log(`Triggering automation for user: ${userName}`);
         const instructionTask = `1. Go to the URL: https://netorg3945244-my.sharepoint.com/:x:/g/personal/serhat_bezla_com/EaPKaJZNrklKtHFOcFLzy_sBGWEM77NUxZtaAOx7fvGMrw?e=1mohil&nav=MTVfezAwMDAwMDAwLTAwMDEtMDAwMC0wNDAwLTAwMDAwMDAwMDAwMH0\n2. Wait: Wait until the spreadsheet is fully interactive and the main title "EMPLOYEE PAID-TIME-OFF REPORT" is visible.\n3. Locate and Select Employee: Find the dropdown menu visually labeled "CHOOSE EMPLOYEE". Click on this dropdown.\n4. Type to Select: In the dropdown or search field that appears, type the name "${userName}" to find and select that specific employee.\n5. Confirm Selection: Press the Enter key to confirm the selection and close the dropdown.\n6. Wait for Update: Wait for 3 seconds to ensure all data on the page, especially the "Current Balance" field, has fully updated based on the new employee selection.\n7. Read Balance: Locate the field visually labeled "Current Balance". Within that area, find the numerical value for "Vacation".\n8. Return Value: Return only the final numerical value that you read from the "Current Balance" field.`;
