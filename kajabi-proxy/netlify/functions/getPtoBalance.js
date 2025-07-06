@@ -1,67 +1,58 @@
-// This is the full and correct code for: /netlify/functions/getPtoBalance.js
+// /netlify/functions/getPtoBalance.js - NEW VERSION
 
-// Helper function to poll for the automation result
 const pollForResult = async (taskId, automationApiKey) => {
+    // (Polling logic remains the same as before...)
     let attempts = 0;
-    const maxAttempts = 30; // Try for 45 seconds
-    const pollInterval = 1500; // 1.5 seconds
-
+    const maxAttempts = 30, pollInterval = 1500;
     while (attempts < maxAttempts) {
         attempts++;
-        console.log(`Polling for task result (ID: ${taskId}, Attempt: ${attempts})`);
-        
         const statusUrl = `https://api.browser-use.com/api/v1/task/${taskId}/status`;
-        const response = await fetch(statusUrl, {
-            headers: { 'Authorization': `Bearer ${automationApiKey}` }
-        });
-        
+        const response = await fetch(statusUrl, { headers: { 'Authorization': `Bearer ${automationApiKey}` } });
         if (!response.ok) {
-            console.error(`Status check failed with status: ${response.status}`);
             await new Promise(resolve => setTimeout(resolve, pollInterval));
-            continue; // Continue polling even if one check fails
+            continue;
         }
-
         const data = await response.json();
-        console.log("Task status response:", data);
-
-        if (data.status === 'completed') return data.result; // Success!
-        if (data.status === 'failed' || data.error) throw new Error("Automation task failed to run.");
-        
+        if (data.status === 'completed') return data.result;
+        if (data.status === 'failed' || data.error) throw new Error("Automation task failed.");
         await new Promise(resolve => setTimeout(resolve, pollInterval));
     }
     throw new Error("Automation task timed out.");
 };
 
-
-// Main handler for the Netlify Function
 exports.handler = async (event, context) => {
-    // These headers are crucial for security and cross-origin requests.
     const headers = {
-        'Access-Control-Allow-Origin': 'https://hub.bezla.com', // Only allows your Kajabi site
+        'Access-Control-Allow-Origin': 'https://hub.bezla.com', 
         'Access-Control-Allow-Headers': 'Content-Type',
         'Access-Control-Allow-Methods': 'POST, OPTIONS'
     };
 
-    // Respond to preflight (OPTIONS) requests
-    if (event.httpMethod === 'OPTIONS') {
-        return { statusCode: 204, headers };
-    }
+    if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers };
 
-    // Get the secret keys from Netlify Environment Variables
+    // Get secrets from Netlify Environment Variables
     const { KAJABI_API_KEY, KAJABI_API_SECRET, AUTOMATION_API_KEY } = process.env;
 
-    // STEP 1: Get the current user's details from Kajabi using their cookie
-    const kajabiUserCookie = event.headers.cookie;
-    if (!kajabiUserCookie) {
-        return { statusCode: 401, headers, body: JSON.stringify({ error: 'User is not authenticated.' }) };
-    }
+    // STEP 1: Get userId from the incoming request body
+    if (!event.body) return { statusCode: 400, headers, body: JSON.stringify({ error: "Request body missing." }) };
     
-    let userName;
+    let userId, userName;
     try {
-        console.log("Fetching user from Kajabi /v1/me endpoint...");
-        const kajabiResponse = await fetch('https://api.kajabi.com/v1/me', {
+        const body = JSON.parse(event.body);
+        userId = body.userId;
+        if (!userId) throw new Error("Missing userId.");
+    } catch (e) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid request body or missing userId." }) };
+    }
+
+    // STEP 2: Use Kajabi API securely to get the name for this ID
+    try {
+        console.log(`Looking up Kajabi name for userId: ${userId}`);
+        const kajabiUserUrl = `https://api.kajabi.com/v1/users/${userId}`;
+        
+        const kajabiResponse = await fetch(kajabiUserUrl, {
             headers: {
-                'Cookie': kajabiUserCookie, // Pass the user's cookie to identify them to Kajabi
+                // Using Basic Auth with Key and Secret for server-to-server call
+                'Authorization': 'Basic ' + Buffer.from(KAJABI_API_KEY + ':' + KAJABI_API_SECRET).toString('base64')
             }
         });
 
@@ -70,15 +61,15 @@ exports.handler = async (event, context) => {
         const userData = await kajabiResponse.json();
         userName = userData.data.attributes.name;
 
-        if (!userName) throw new Error("Could not find user name in Kajabi API response.");
-        console.log(`Successfully identified user: ${userName}`);
+        if (!userName) throw new Error("Could not find user name for the provided ID.");
+        console.log(`Successfully found name: ${userName}`);
 
     } catch (error) {
-        console.error("Error fetching user from Kajabi:", error);
-        return { statusCode: 500, headers, body: JSON.stringify({ error: 'Failed to get user info from Kajabi.' }) };
+        console.error("Error looking up user name in Kajabi:", error);
+        return { statusCode: 500, headers, body: JSON.stringify({ error: 'Failed to look up user name.' }) };
     }
 
-    // STEP 2 & 3: Trigger the automation and poll for the result
+    // STEP 3 & 4: Trigger the automation and poll for the result
     try {
         console.log(`Triggering automation for user: ${userName}`);
         const instructionTask = `1. Go to the URL: https://netorg3945244-my.sharepoint.com/:x:/g/personal/serhat_bezla_com/EaPKaJZNrklKtHFOcFLzy_sBGWEM77NUxZtaAOx7fvGMrw?e=1mohil&nav=MTVfezAwMDAwMDAwLTAwMDEtMDAwMC0wNDAwLTAwMDAwMDAwMDAwMH0\n2. Wait: Wait until the spreadsheet is fully interactive and the main title "EMPLOYEE PAID-TIME-OFF REPORT" is visible.\n3. Locate and Select Employee: Find the dropdown menu visually labeled "CHOOSE EMPLOYEE". Click on this dropdown.\n4. Type to Select: In the dropdown or search field that appears, type the name "${userName}" to find and select that specific employee.\n5. Confirm Selection: Press the Enter key to confirm the selection and close the dropdown.\n6. Wait for Update: Wait for 3 seconds to ensure all data on the page, especially the "Current Balance" field, has fully updated based on the new employee selection.\n7. Read Balance: Locate the field visually labeled "Current Balance". Within that area, find the numerical value for "Vacation".\n8. Return Value: Return only the final numerical value that you read from the "Current Balance" field.`;
@@ -95,11 +86,7 @@ exports.handler = async (event, context) => {
 
         const ptoBalance = await pollForResult(runTaskData.id, AUTOMATION_API_KEY);
 
-        return {
-            statusCode: 200,
-            headers,
-            body: JSON.stringify({ balance: ptoBalance })
-        };
+        return { statusCode: 200, headers, body: JSON.stringify({ balance: ptoBalance }) };
 
     } catch (error) {
         console.error("Error during automation:", error);
